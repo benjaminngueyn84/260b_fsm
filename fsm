@@ -1,1 +1,252 @@
 txt file
+module norm_tb;
+
+parameter bw = 8;              // Bit-width for individual weights
+parameter total_cycle = 8;     // Number of cycles (columns)
+parameter row_count = 8;       // Number of rows
+
+reg clk = 0;
+reg div = 0;
+reg wr = 0;
+reg reset = 0;
+reg [bw-1:0] w_vector_bin;
+wire [2*bw-1:0] out;
+wire full, ready;
+
+integer w_file;                // File handler for reading weights
+integer w_scan_file;           // File handler for reading weights
+integer captured_data;
+reg [bw-1:0] binary;
+integer i, u, r;
+
+integer w[row_count-1:0][total_cycle-1:0]; // 2D array of integer for weight values (8x8)
+reg [2*bw-1:0] out_reg [row_count-1:0][total_cycle-1:0]; // 2D array for hardware output (8x8)
+reg [2*bw-1:0] expected_out_reg [row_count-1:0][total_cycle-1:0]; // 2D array for expected output (8x8)
+
+// FSM State Declaration
+state_t current_state, next_state;
+
+// Function to convert integer to binary
+function [3:0] w_bin;
+  input integer weight;
+  begin
+    if (weight > -1)
+      w_bin[3] = 0;
+    else begin
+      w_bin[3] = 1;
+      weight = weight + 8;
+    end
+
+    if (weight > 3) begin
+      w_bin[2] = 1;
+      weight = weight - 4;
+    end else
+      w_bin[2] = 0;
+
+    if (weight > 1) begin
+      w_bin[1] = 1;
+      weight = weight - 2;
+    end else
+      w_bin[1] = 0;
+
+    if (weight > 0)
+      w_bin[0] = 1;
+    else
+      w_bin[0] = 0;
+  end
+endfunction
+
+// Task to compute normalized values and compare with hardware output
+task compute_and_compare_normalization;
+  integer row_sum;
+  real norm_value;
+  begin
+    for (r = 0; r < row_count; r = r + 1) begin
+      row_sum = 0;
+      for (u = 0; u < total_cycle; u = u + 1) begin
+        if (w[r][u] < 0) begin
+          w[r][u] = -1*w[r][u];
+        end
+        row_sum = row_sum + (w[r][u]);
+      end
+      $display("abs row sum is: %d", $abs($signed(row_sum)));
+      for (i = 0; i < total_cycle; i = i + 1) begin
+        expected_out_reg[r][i] = (w[r][i]*256) / row_sum;
+      end
+
+      for (i = 0; i < total_cycle; i = i + 1) begin
+        if ($signed(out_reg[r][i]) !== $signed(expected_out_reg[r][i])) begin
+          $display("Mismatch at row %0d, element %0d: Estimated norm value %f, Hardware output %d", r, i, expected_out_reg[r][i], out_reg[r][i]);
+        end else begin
+          $display("Match at row %0d, element %0d: Estimated norm value %f, Hardware output %d", r, i, expected_out_reg[r][i], out_reg[r][i]);
+        end
+      end
+    end
+  end
+endtask
+
+task write_output_to_file;
+  integer output_file;
+  begin
+    output_file = $fopen("output_normalization.txt", "w");
+    if (output_file == 0) begin
+      $display("Error: Unable to open file 'output_normalization.txt' for writing.");
+      $finish;
+    end
+
+    for (r = 0; r < row_count; r = r + 1) begin
+      for (i = 0; i < total_cycle; i = i + 1) begin
+        $fwrite(output_file, "%d ", out_reg[r][i]);
+      end
+      $fwrite(output_file, "\n");
+    end
+    $fclose(output_file);
+  end
+endtask
+
+norm #(.bw(bw)) norm_instance (
+    .clk(clk),
+    .in(binary),
+    .out(out),
+    .div(div),
+    .wr(wr),
+    .reset(reset)
+);
+
+// State Transition Logic
+always @(posedge clk or posedge reset) begin
+  if (reset) begin
+    current_state <= IDLE;
+  end else begin
+    current_state <= next_state;
+  end
+end
+
+// Next State Logic
+always @(*) begin
+  case (current_state)
+    IDLE: begin
+      if (reset == 0)
+        next_state = RESET;
+      else
+        next_state = IDLE;
+    end
+    RESET: begin
+      next_state = READ_WEIGHTS;
+    end
+    READ_WEIGHTS: begin
+      if (r == row_count - 1 && i == total_cycle - 1)
+        next_state = WAIT_AFTER_WR;
+      else
+        next_state = READ_WEIGHTS;
+    end
+    WAIT_AFTER_WR: begin
+      next_state = DIVIDE;
+    end
+    DIVIDE: begin
+      if (i == total_cycle - 1)
+        next_state = STORE_OUTPUT;
+      else
+        next_state = DIVIDE;
+    end
+    STORE_OUTPUT: begin
+      if (r == row_count - 1 && i == total_cycle - 1)
+        next_state = COMPARE_NORMALIZATION;
+      else
+        next_state = READ_WEIGHTS;
+    end
+    COMPARE_NORMALIZATION: begin
+      next_state = WRITE_OUTPUT;
+    end
+    WRITE_OUTPUT: begin
+      next_state = FINISH;
+    end
+    FINISH: begin
+      next_state = FINISH;
+    end
+    default: next_state = IDLE;
+  endcase
+end
+
+// State Machine Execution
+always @(posedge clk) begin
+  case (current_state)
+    IDLE: begin
+      // Do nothing, wait for reset to go low
+    end
+    RESET: begin
+      reset = 1;
+      clk = 1'b1;
+      #1 clk = 1'b0;
+      reset = 0;
+      clk = 1'b1;
+      #1 clk = 1'b0;
+    end
+    READ_WEIGHTS: begin
+      wr = 1;
+      w_scan_file = $fscanf(w_file, "%d ", captured_data);
+      w[r][i] = captured_data;
+      binary = w[r][i];
+      clk = 1'b1;
+      #1 clk = 1'b0;
+      if (i == total_cycle - 1) begin
+        wr = 0;
+        clk = 1'b1;
+        #1 clk = 1'b0;
+      end
+    end
+    WAIT_AFTER_WR: begin
+      repeat(4) begin
+        clk = 1'b1;
+        #1 clk = 1'b0;
+      end
+    end
+    DIVIDE: begin
+      div = 1;
+      clk = 1'b1;
+      #1 clk = 1'b0;
+      div = 0;
+      out_reg[r][i] = out;
+      repeat(3) begin
+        clk = 1'b1;
+        #1 clk = 1'b0;
+      end
+    end
+    STORE_OUTPUT: begin
+      if (r == row_count - 1 && i == total_cycle - 1) begin
+        reset = 1;
+        clk = 1'b1;
+        #1 clk = 1'b0;
+        reset = 0;
+        clk = 1'b1;
+        #1 clk = 1'b0;
+      end
+    end
+    COMPARE_NORMALIZATION: begin
+      compute_and_compare_normalization;
+    end
+    WRITE_OUTPUT: begin
+      write_output_to_file;
+    end
+    FINISH: begin
+      $finish;
+    end
+  endcase
+end
+
+initial begin
+  w_file = $fopen("Qt_K.txt", "r");
+  $dumpfile("norm_tb.vcd");
+  $dumpvars(0, norm_tb);
+  current_state = IDLE;
+  next_state = IDLE;
+  reset = 1;
+  #1 clk = 1'b0;
+  #1 clk = 1'b1;
+  #1 clk = 1'b0;
+  reset = 0;
+  #1 clk = 1'b1;
+  #1 clk = 1'b0;
+end
+
+endmodule
