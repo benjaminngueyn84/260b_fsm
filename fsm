@@ -250,3 +250,18 @@ initial begin
 end
 
 endmodule
+
+
+// Define states as parameters
+parameter IDLE = 3'd0;
+parameter RESET = 3'd1;
+parameter READ_WEIGHTS = 3'd2;
+parameter WAIT_AFTER_WR = 3'd3;
+parameter DIVIDE = 3'd4;
+parameter STORE_OUTPUT = 3'd5;
+parameter COMPARE_NORMALIZATION = 3'd6;
+parameter WRITE_OUTPUT = 3'd7;
+parameter FINISH = 3'd8;
+
+// State register
+reg [3:0] current_state, next_state;
